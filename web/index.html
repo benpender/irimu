@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tracking Display</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: black;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        #stage {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+
+        #tracker {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background-color: red;
+            border: 2px solid white;
+            border-radius: 50%;
+            /* Optional: make it a circle or keep square per request */
+            top: 0;
+            left: 0;
+            transform: translate(-50%, -50%);
+            /* Centered on coordinate */
+            z-index: 200;
+            /* Ensure above calibration overlay */
+            pointer-events: none;
+            /* Let clicks pass through */
+        }
+    </style>
+</head>
+
+<body>
+    <div id="stage">
+        <div id="tracker"></div>
+        <div id="status"
+            style="position: absolute; top: 10px; left: 10px; color: lime; font-family: monospace; z-index: 10;">
+            Status: Connecting...<br>
+            Raw: -
+        </div>
+        <div id="controls"
+            style="position: absolute; top: 10px; right: 10px; color: white; z-index: 10; font-family: sans-serif;">
+            <label><input type="checkbox" id="imuToggle" checked> Enable IMU</label>
+            <br>
+            <label><input type="checkbox" id="mirrorToggle"> Mirror View</label>
+            <br>
+            <label>Camera:
+                <select id="cameraMode" style="margin-top: 5px;">
+                    <option value="left" selected>Left (Default)</option>
+                    <option value="right">Right</option>
+                    <option value="full">Stereo (Full)</option>
+                </select>
+            </label>
+            <br>
+            <img id="debugVideo"
+                style="border: 1px solid white; max-width: 320px; object-fit: contain; margin-top: 10px; background: #333;">
+            <br>
+            <button id="btnCalibrate" style="margin-top: 10px;">Calibrate Screen</button>
+            <button id="btnReset" style="margin-top: 10px; margin-left: 5px;">Reset</button>
+        </div>
+
+        <!-- Calibration Overlay -->
+        <div id="calibOverlay"
+            style="display: none; position: absolute; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.8); z-index: 100;">
+            <div id="calibTarget"
+                style="position: absolute; width: 20px; height: 20px; background: red; border-radius: 50%; display: none;">
+            </div>
+            <div id="calibText"
+                style="position: absolute; width: 100%; text-align: center; top: 50%; color: white; font-family: sans-serif; font-size: 24px;">
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const tracker = document.getElementById('tracker');
+        const statusDiv = document.getElementById('status');
+        const debugVideo = document.getElementById('debugVideo');
+        const imuToggle = document.getElementById('imuToggle');
+        const mirrorToggle = document.getElementById('mirrorToggle');
+        const cameraMode = document.getElementById('cameraMode');
+        const btnCalibrate = document.getElementById('btnCalibrate');
+        const btnReset = document.getElementById('btnReset');
+        const calibOverlay = document.getElementById('calibOverlay');
+        const calibTarget = document.getElementById('calibTarget');
+        const calibText = document.getElementById('calibText');
+
+        // Default constraints (will be overwritten by calibration or dynamic update)
+        let minX = 0, minY = 0;
+        let maxX = 640; // temporary default
+        let maxY = 480;
+
+        // Dynamic Resolution State
+        let serverFrameW = 0;
+        let serverFrameH = 0;
+
+        // Calibration State
+        let isCalibrating = false;
+        let calibStep = 0; // 0: None, 1: Top-Left, 2: Bottom-Right
+        let rawPos = { x: 0, y: 0 }; // Current raw position
+
+        function startCalibration() {
+            // Remove focus from button so Spacebar doesn't trigger it again
+            btnCalibrate.blur();
+
+            isCalibrating = true;
+            calibStep = 1;
+            calibOverlay.style.display = 'block';
+
+            // Show Top-Left Target
+            calibTarget.style.display = 'block';
+            calibTarget.style.top = '20px';
+            calibTarget.style.left = '20px';
+            calibText.innerText = "Target 1/2: Top-Left. Press SPACE.";
+        }
+
+        function createCalibrationHandler() {
+            window.addEventListener('keydown', (e) => {
+                if (!isCalibrating) return;
+                if (e.repeat) return; // Prevent key repeat/bounce
+
+                if (e.code === 'Space') {
+                    e.preventDefault(); // Stop scrolling or button pressing
+                    if (calibStep === 1) {
+                        minX = rawPos.x;
+                        minY = rawPos.y;
+
+                        // Move to Bottom-Right
+                        calibStep = 2;
+                        calibTarget.style.top = (window.innerHeight - 40) + 'px';
+                        calibTarget.style.left = (window.innerWidth - 40) + 'px';
+                        calibText.innerText = "Target 2/2: Bottom-Right. Press SPACE.";
+                    } else if (calibStep === 2) {
+                        maxX = rawPos.x;
+                        maxY = rawPos.y;
+
+                        // Finish
+                        isCalibrating = false;
+                        calibStep = 0;
+                        calibOverlay.style.display = 'none';
+                        console.log(`Calibrated: X[${minX.toFixed(0)} - ${maxX.toFixed(0)}], Y[${minY.toFixed(0)} - ${maxY.toFixed(0)}]`);
+                    }
+                }
+            });
+        }
+
+        function resetCalibration() {
+            // Reset to defaults (will pick up dynamic frame size on next packet)
+            minX = 0; minY = 0;
+            maxX = serverFrameW || 640;
+            maxY = serverFrameH || 480;
+            console.log("Calibration Reset");
+        }
+
+        btnCalibrate.onclick = startCalibration;
+        btnReset.onclick = resetCalibration;
+        createCalibrationHandler();
+
+        function connect() {
+            const ws = new WebSocket('ws://localhost:8765');
+
+            function sendConfig() {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'config',
+                        use_imu: imuToggle.checked,
+                        camera_mode: cameraMode.value,
+                        mirror: mirrorToggle.checked
+                    }));
+                }
+            }
+
+            ws.onopen = () => {
+                console.log('Connected to Tracker');
+                statusDiv.innerHTML = "Status: Connected<br>Waiting for data...";
+                sendConfig(); // Sync on connect
+            };
+
+            imuToggle.onchange = sendConfig;
+            mirrorToggle.onchange = sendConfig;
+            cameraMode.onchange = sendConfig;
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                // Update Status Text
+                statusDiv.innerHTML = `Status: Connected<br>
+                                       Raw: ${data.x.toFixed(1)}, ${data.y.toFixed(1)}<br>
+                                       Cam In: ${data.frame_w}x${data.frame_h}<br>
+                                       Detected: ${data.detected ? 'YES' : 'NO'}<br>
+                                       IMU Filtered: ON<br>
+                                       Calibration: ${minX.toFixed(0)},${minY.toFixed(0)} to ${maxX.toFixed(0)},${maxY.toFixed(0)}`;
+
+                const w = window.innerWidth;
+                const h = window.innerHeight;
+
+                // Update Dynamic Resolution Defaults if not calibrated
+                // If user has NOT calibrated yet, we want to auto-scale to the full camera frame
+                if (data.frame_w && data.frame_h && (data.frame_w !== serverFrameW || data.frame_h !== serverFrameH)) {
+                    serverFrameW = data.frame_w;
+                    serverFrameH = data.frame_h;
+                    // Only update defaults if we haven't calibrated (heuristic: min and max are still close to initial)
+                    // Actually, simpler: if we just started up, let's set max to frame size
+                    // But calibration overwrites them.
+                    // Let's just use serverFrame for the uncalibrated fallback logic below.
+                }
+
+                // Store raw pos for calibration
+                rawPos.x = data.x;
+                rawPos.y = data.y;
+
+                // Update Video
+                if (data.image) {
+                    debugVideo.src = data.image;
+                }
+
+                // Don't move tracker during calibration
+                if (isCalibrating) {
+                    // Visual feedback during calibration
+                    // Use server frame size if available, else fallback
+                    let fw = serverFrameW || 640;
+                    let fh = serverFrameH || 480;
+
+                    let x = (data.x / fw) * w;
+                    let y = (data.y / fh) * h;
+                    tracker.style.transform = `translate(${x}px, ${y}px)`;
+                    return;
+                }
+
+                // Map camera coordinates to screen coordinates
+                // If calibrated, use minX/maxX. 
+                // If NOT calibrated (defaults), we should use 0..serverFrameW
+                // But wait, minX/maxX are initialized. 
+                // Let's assume if minX=0 and maxX=640 (default), we might want to update maxX to serverFrameW
+                // But calibration overwrites them.
+                // Simple logic: Use current minX/maxX.
+
+                const rangeX = maxX - minX || 1;
+                const rangeY = maxY - minY || 1;
+
+                let x = ((data.x - minX) / rangeX) * w;
+                let y = ((data.y - minY) / rangeY) * h;
+
+                // Debug values
+                statusDiv.innerHTML += `<br>Screen: ${x.toFixed(0)}, ${y.toFixed(0)}`;
+
+                tracker.style.transform = `translate(${x}px, ${y}px)`;
+            };
+
+            ws.onclose = () => {
+                console.log('Disconnected. Reconnecting...');
+                statusDiv.innerHTML = "Status: Disconnected. Reconnecting...";
+                setTimeout(connect, 1000);
+            };
+
+            ws.onerror = (err) => {
+                console.error('Socket error', err);
+                ws.close();
+            };
+        }
+
+        connect();
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,16 @@
+# MacOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+.env
+
+# PlatformIO
+.pio/
+.vscode/
+
+# Editor
+.idea/
