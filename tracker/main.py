@@ -102,17 +102,19 @@ class Tracker:
                     user_accel = raw_accel - self.gravity
                     
                     # Use filtered accel for control
+                    # Use filtered accel for control
                     if self.use_imu:
-                        # Scale factor might need tuning, 1000 was arbitrary. 
-                        # Real world accel is in g's (9.8 m/s^2).
+                        # Scale factor - converting 'g' units to 'pixel acceleration'
                         control = np.array([[user_accel[0] * 2000], [user_accel[1] * 2000]], np.float32)
+                        
+                        # Only predict/update high-speed if we are actually using IMU
+                        prediction = self.kf.predict(control)
+                        self.latest_pos['x'] = float(prediction[0])
+                        self.latest_pos['y'] = float(prediction[1])
                     else:
-                        control = np.zeros((2, 1), np.float32)
-
-                    prediction = self.kf.predict(control)
-                    
-                    self.latest_pos['x'] = float(prediction[0])
-                    self.latest_pos['y'] = float(prediction[1])
+                        # If IMU is off, do NOT predict or update position here.
+                        # Rely solely on the Camera loop (30Hz) for stable, non-bouncy position.
+                        pass
             except Exception as e:
                 print(f"UDP Error: {e}")
 
