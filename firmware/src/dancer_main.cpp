@@ -10,6 +10,7 @@
 // ----------------------------------------------------------------------------
 // CONFIGURATION
 // ----------------------------------------------------------------------------
+// NO DEVICE ID! (Generic Firmware)
 #define SDA_PIN 11
 #define SCL_PIN 12
 #define IMU_IRQ 21
@@ -24,6 +25,7 @@
 CRGB leds[NUM_LEDS];
 SensorQMI8658 qmi;
 uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t myMac[6]; // Store my own MAC
 
 struct ImuData {
   float ax, ay, az;
@@ -31,17 +33,38 @@ struct ImuData {
   uint32_t timestamp;
 };
 
+// Packet Types
+#define PKT_IMU 0x01
+#define PKT_HEARTBEAT 0xHB
+
 // ----------------------------------------------------------------------------
 // ESP-NOW CALLBACKS
 // ----------------------------------------------------------------------------
 
 // RECEIVE LED DATA (From Bridge TX)
+// Format: [TargetMAC (6)] [RGB Data (192)]
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-  if (len == NUM_LEDS * 3) {
-    // Direct copy to FastLED buffer
-    memcpy(leds, incomingData, len);
-    // Note: We don't call show() here to avoid interrupt conflicts.
-    // The main loop will call show().
+  // 1. MAC Addressed Packet (198 bytes)
+  if (len == 198) {
+    if (memcmp(incomingData, myMac, 6) == 0) {
+      // SUCCESS: Green
+      fill_solid(leds, NUM_LEDS, CRGB::Green);
+      FastLED.show();
+    } else {
+      // WRONG MAC: Blue
+      fill_solid(leds, NUM_LEDS, CRGB::Blue);
+      FastLED.show();
+    }
+  }
+  // 2. Legacy Broadcast (192 bytes)
+  else if (len == 192) {
+    // BROADCAST: Magenta
+    fill_solid(leds, NUM_LEDS, CRGB::Magenta);
+    FastLED.show();
+  } else {
+    // WRONG LENGTH: Yellow
+    fill_solid(leds, NUM_LEDS, CRGB::Yellow);
+    FastLED.show();
   }
 }
 
@@ -51,10 +74,32 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 // ----------------------------------------------------------------------------
-// SETUP
+// HEARTBEAT
 // ----------------------------------------------------------------------------
+void sendHeartbeat() {
+  uint8_t hbPacket[8];
+  hbPacket[0] = 0xFA; // Magic Heartbeat (Using 0xFA to match bridge known types
+                      // if needed, or stick to 0xHB)
+  // Actually, let's use a distinct Header for Heartbeat so Bridge can wrap it
+  // easily. Bridge wraps everything... so it doesn't matter. Let's use 0xHB
+  // (HeartBeat) -> 0x48 0x42
+  hbPacket[0] = 'H';
+  hbPacket[1] = 'B';
+  memcpy(hbPacket + 2, myMac, 6);
+
+  esp_now_send(broadcastAddress, hbPacket, 8);
+}
+
 void setup() {
   Serial.begin(115200);
+  delay(1000); // Fast Boot
+  Serial.println("BOOT_GENERIC_DANCER");
+
+  // Get MAC
+  WiFi.mode(WIFI_STA);
+  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  Serial.printf("MY_MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", myMac[0], myMac[1],
+                myMac[2], myMac[3], myMac[4], myMac[5]);
 
   // Setup FastLED
   FastLED.addLeds<WS2812B, LED_PIN, RGB>(leds, NUM_LEDS);
@@ -64,9 +109,6 @@ void setup() {
   fill_solid(leds, NUM_LEDS, CRGB::Blue);
   FastLED.show();
   delay(250);
-
-  // Setup WiFi
-  WiFi.mode(WIFI_STA);
 
   // FORCE CHANNEL 1
   esp_wifi_set_promiscuous(true);
@@ -108,8 +150,8 @@ void setup() {
     return;
   }
 
-  // 3. PEER OK [MAGENTA]
-  fill_solid(leds, NUM_LEDS, CRGB::Magenta);
+  // 3. READY [RED]
+  fill_solid(leds, NUM_LEDS, CRGB::Red);
   FastLED.show();
   delay(100);
 
@@ -171,6 +213,13 @@ void loop() {
 
   static uint32_t lastReadLog = 0;
   bool timeToLog = (millis() - lastReadLog > 500);
+
+  // Heartbeat Logic
+  static uint32_t lastHeartbeat = 0;
+  if (millis() - lastHeartbeat > 1000) {
+    lastHeartbeat = millis();
+    sendHeartbeat();
+  }
 
   if (success && successG) {
     ImuData data;

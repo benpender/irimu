@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera FPS Test</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: black;
+            color: white;
+            font-family: monospace;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #video-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1;
+        }
+
+        video {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 10;
+            max-width: 400px;
+            pointer-events: auto;
+        }
+
+        .control-group {
+            margin-bottom: 10px;
+        }
+
+        .control-group label {
+            display: inline-block;
+            width: 80px;
+        }
+
+        input {
+            background: #333;
+            border: 1px solid #555;
+            color: white;
+            padding: 2px 5px;
+            width: 80px;
+        }
+
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            cursor: pointer;
+            width: 100%;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+
+        button:hover {
+            background: #0055aa;
+        }
+
+        hr {
+            border: 0;
+            border-top: 1px solid #555;
+            margin: 10px 0;
+        }
+
+        .stat-line {
+            line-height: 1.4;
+        }
+
+        .unit {
+            color: #aaa;
+            font-size: 0.9em;
+        }
+
+        .warning {
+            color: #ffaa00;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="video-container">
+        <video id="camera" playsinline autoplay muted></video>
+    </div>
+
+    <div id="overlay">
+        <h3>Camera FPS / Settings</h3>
+
+        <div class="control-group">
+            <label>Width:</label>
+            <input type="number" id="input-width" value="1280">
+        </div>
+        <div class="control-group">
+            <label>Height:</label>
+            <input type="number" id="input-height" value="720">
+        </div>
+        <div class="control-group">
+            <label>FPS:</label>
+            <input type="number" id="input-fps" value="120">
+        </div>
+        <button id="start-btn">Start Camera</button>
+
+        <div id="stats" style="display:none;">
+            <hr>
+            <h4>Requested</h4>
+            <div class="stat-line" id="req-stat"></div>
+
+            <h4>Actual (Track Settings)</h4>
+            <div class="stat-line" id="act-stat"></div>
+
+            <h4>Live Measurement</h4>
+            <div class="stat-line">Resolution: <span id="live-res">-</span></div>
+            <div class="stat-line">Interval: <span id="live-interval">-</span> <span class="unit">ms</span></div>
+            <div class="stat-line">FPS: <span id="live-fps">-</span></div>
+            <div class="stat-line">Dropped Frames: <span id="dropped-frames">0</span></div>
+
+            <hr>
+            <h4>Session Stats</h4>
+            <div class="stat-line">Top (fastest): <span id="stat-top">-</span> <span class="unit">ms</span> / <span
+                    id="stat-top-fps">-</span> <span class="unit">fps</span></div>
+            <div class="stat-line">Bottom (slowest): <span id="stat-bottom">-</span> <span class="unit">ms</span> /
+                <span id="stat-bottom-fps">-</span> <span class="unit">fps</span>
+            </div>
+            <div class="stat-line">Average: <span id="stat-avg">-</span> <span class="unit">ms</span> / <span
+                    id="stat-avg-fps">-</span> <span class="unit">fps</span></div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('camera');
+        const startBtn = document.getElementById('start-btn');
+        const statsDiv = document.getElementById('stats');
+
+        // Inputs
+        const widthInput = document.getElementById('input-width');
+        const heightInput = document.getElementById('input-height');
+        const fpsInput = document.getElementById('input-fps');
+
+        // Display elements
+        const reqStatEl = document.getElementById('req-stat');
+        const actStatEl = document.getElementById('act-stat');
+        const liveResEl = document.getElementById('live-res');
+        const liveIntervalEl = document.getElementById('live-interval');
+        const liveFpsEl = document.getElementById('live-fps');
+
+        const droppedFramesEl = document.getElementById('dropped-frames');
+
+        // Session Stats Elements
+        const statTopMsEl = document.getElementById('stat-top');
+        const statTopFpsEl = document.getElementById('stat-top-fps');
+        const statBottomMsEl = document.getElementById('stat-bottom');
+        const statBottomFpsEl = document.getElementById('stat-bottom-fps');
+        const statAvgMsEl = document.getElementById('stat-avg');
+        const statAvgFpsEl = document.getElementById('stat-avg-fps');
+
+        let lastFrameTime = 0;
+        let activeStream = null;
+
+        // Stats variables
+        let minMs = Infinity;
+        let maxMs = 0;
+        let totalMs = 0;
+        let samples = 0;
+
+        startBtn.addEventListener('click', startCamera);
+
+        async function startCamera() {
+            // Stop existing stream if any
+            if (activeStream) {
+                activeStream.getTracks().forEach(track => track.stop());
+            }
+
+            const width = parseInt(widthInput.value);
+            const height = parseInt(heightInput.value);
+            const fps = parseInt(fpsInput.value);
+
+            const constraints = {
+                video: {
+                    width: { ideal: width },
+                    height: { ideal: height },
+                    frameRate: { ideal: fps, max: fps }
+                }
+            };
+
+            // Update Requested Display
+            reqStatEl.innerText = `${width}x${height} @ ${fps}fps`;
+            statsDiv.style.display = 'block';
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                activeStream = stream;
+                video.srcObject = activeStream;
+
+                const videoTrack = stream.getVideoTracks()[0];
+                const settings = videoTrack.getSettings();
+
+                // Log settings to console
+                console.log("Camera Track Settings:", settings);
+                console.log("Camera Capabilities:", videoTrack.getCapabilities ? videoTrack.getCapabilities() : "Not supported");
+
+                // Update Actual Display
+                const actWidth = settings.width;
+                const actHeight = settings.height;
+                const actFps = settings.frameRate; // Note: might be undefined on some browsers if not settled yet
+
+                let actText = "";
+                if (actWidth && actHeight) actText += `${actWidth}x${actHeight}`;
+                if (actFps) actText += ` @ ${actFps.toFixed(2)}fps`;
+                else actText += ` (FPS not reported by settings)`;
+
+                actStatEl.innerText = actText;
+
+                // Reset measurements
+                lastFrameTime = 0;
+                minMs = Infinity;
+                maxMs = 0;
+                totalMs = 0;
+                samples = 0;
+
+                // Reset UI
+                statTopMsEl.innerText = "-";
+                statTopFpsEl.innerText = "-";
+                statBottomMsEl.innerText = "-";
+                statBottomFpsEl.innerText = "-";
+                statAvgMsEl.innerText = "-";
+                statAvgFpsEl.innerText = "-";
+
+                // Start measurement loop
+                if (video.requestVideoFrameCallback) {
+                    video.requestVideoFrameCallback(onFrame);
+                } else {
+                    alert("Your browser does not support requestVideoFrameCallback. Measurements will be less accurate.");
+                    // Fallback using requestAnimationFrame could be added, 
+                    // but requestVideoFrameCallback is specifically requested.
+                }
+
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                actStatEl.innerHTML = `<span class="warning">Error: ${err.message}</span>`;
+            }
+        }
+
+        function onFrame(now, metadata) {
+            // Calculate instant interval
+            // metadata.mediaTime -> The time in seconds of the frame
+            // metadata.expectedDisplayTime -> The time the frame is expected to be displayed
+            // We can use the 'now' parameter which is generally hi-res timestamp
+
+            if (lastFrameTime !== 0) {
+                const deltaMs = now - lastFrameTime;
+                const instantFps = 1000 / deltaMs;
+
+                // Update Live
+                liveIntervalEl.innerText = deltaMs.toFixed(2);
+                liveFpsEl.innerText = instantFps.toFixed(1);
+
+                // Update Stats
+                samples++;
+                totalMs += deltaMs;
+
+                if (deltaMs < minMs) {
+                    minMs = deltaMs;
+                    statTopMsEl.innerText = minMs.toFixed(2);
+                    statTopFpsEl.innerText = (1000 / minMs).toFixed(1);
+                }
+
+                if (deltaMs > maxMs) {
+                    maxMs = deltaMs;
+                    statBottomMsEl.innerText = maxMs.toFixed(2);
+                    statBottomFpsEl.innerText = (1000 / maxMs).toFixed(1);
+                }
+
+                const avgMs = totalMs / samples;
+                statAvgMsEl.innerText = avgMs.toFixed(2);
+                statAvgFpsEl.innerText = (1000 / avgMs).toFixed(1);
+            }
+
+            // Just double check resolution from video element properties
+            if (video.videoWidth) {
+                liveResEl.innerText = `${video.videoWidth}x${video.videoHeight}`;
+            }
+
+            if (metadata.droppedFrames !== undefined) {
+                droppedFramesEl.innerText = metadata.droppedFrames;
+            }
+
+            lastFrameTime = now;
+
+            // Re-schedule
+            if (activeStream && activeStream.active) {
+                video.requestVideoFrameCallback(onFrame);
+            }
+        }
+    </script>
+</body>
+
+</html>
