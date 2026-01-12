@@ -1,43 +1,50 @@
 # IRIMU Tracking System
 
-This project implements a high-speed tracking system using an ESP32-S3 Matrix IMU and a Stereoscopic Webcam.
+High-speed IR beacon tracking using an ESP32-S3, a stereo USB camera, and a browser visualization.
 
 ## Structure
 - `/firmware`: PlatformIO project for ESP32-S3.
-- `/tracker`: Python script for Computer Vision + Sensor Fusion.
+- `/tracker`: Python CV tracker + beacon detection + WebSocket server.
 - `/web`: HTML frontend for visualization.
 
-## Setup Instructions
+## Quick Start
 
-### 1. Firmware (ESP32-S3)
-1. Navigate to `firmware/src/main.cpp`.
-2. **IMPORTANT**: Update `YOUR_SSID`, `YOUR_PASSWORD`, and `udpAddress` (Your PC's IP) at the top of the file.
-3. Connect your ESP32-S3 Matrix via USB.
-4. Build and Upload:
-   ```bash
-   cd firmware
-   pio run -t upload
-   ```
-   (Or use your PlatformIO IDE extension).
+### 1. Hardware (ESP32-S3)
+- IR LED on GPIO 4 and GND.
+- Firmware `ir_beacon` (8kHz carrier + 40Hz envelope) should already be flashed.
+- To re-flash:
+  ```bash
+  cd firmware
+  pio run -e ir_beacon -t upload
+  ```
 
-### 2. Tracker (Python)
-1. Install dependencies:
-   ```bash
-   cd tracker
-   pip install -r requirements.txt
-   ```
-2. Connect your USB Webcam.
-3. Run the tracker:
-   ```bash
-   python main.py
-   ```
-   *Note: If the camera doesn't open, change `CAMERA_INDEX` in `main.py`.*
+### 2. Run the Tracker (Back-end)
+Start the tracker from the project root:
+```bash
+python3 tracker/ir_tracker.py
+```
+Expected output:
+- `Camera initialized: 2560x720 @ 120 FPS`
+- `WebSocket Server started on ws://localhost:8765`
 
-### 3. Visualization
-1. Open `web/index.html` in your browser.
-2. Ensure the Python tracker is running.
-3. You should see the white dot move as you move the ESP32 Matrix!
+### 3. Open the Visualization (Front-end)
+```bash
+open web/tracking_view.html
+```
+What you'll see:
+- Red Cross: raw brightest point (sunlight/noise).
+- Green Dot: appears only when the IR beacon is detected (pulsing signal).
+- Graph: real-time brightness waveform.
 
-## Tuning
-- **IMU Sensitivity**: Adjust `control` matrix multiplication in `tracker/main.py` if the IMU movement is too strong/weak.
-- **LED Detection**: Adjust the threshold `200` in `tracker/main.py` if the LED isn't detected.
+## Key Files
+- `tracker/ir_tracker.py`: Main CV loop, camera setup, max-brightness tracking, JSON via WebSocket.
+- `tracker/beacon_detect.py`: Beacon detection (variance + edge transition checks across ~30 frames).
+- `web/tracking_view.html`: Frontend render (video plane, red cross, green dot, graph).
+
+## Troubleshooting
+- WebSocket already in use:
+  ```bash
+  lsof -ti:8765 | xargs kill -9
+  ```
+- "SEARCHING..." but LED is close: camera may be clipping at 255. Move LED back or dim room.
+- Green dot jumping: tracker holds last known position during OFF pulses; jumps mean lock lost.

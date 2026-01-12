@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IR Tracker Calibration</title>
+  <style>
+    :root {
+      --bg: #111;
+      --fg: #e6e6e6;
+      --accent: #2dff8b;
+      --warn: #ff7b7b;
+      --muted: #8a8a8a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 20%, #1b1b1b, #0b0b0b 60%);
+      color: var(--fg);
+      font-family: "Courier New", Courier, monospace;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #stage {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    #projectorCanvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: #050505;
+    }
+
+    .marker {
+      position: absolute;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 2px solid #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      cursor: grab;
+      user-select: none;
+      background: rgba(0, 0, 0, 0.6);
+      box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+    }
+
+    .marker:active {
+      cursor: grabbing;
+    }
+
+    .marker.hidden {
+      display: none;
+    }
+
+    #markerA {
+      border-color: #2dff8b;
+      color: #2dff8b;
+    }
+
+    #markerB {
+      border-color: #6aa7ff;
+      color: #6aa7ff;
+    }
+
+    #markerC {
+      border-color: #ffd36a;
+      color: #ffd36a;
+    }
+
+    #hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid #333;
+      padding: 10px 12px;
+      font-size: 14px;
+      line-height: 1.4;
+      max-width: 360px;
+    }
+
+    #hud strong {
+      color: var(--accent);
+    }
+
+    #controls {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid #333;
+      padding: 10px 12px;
+      font-size: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    button {
+      background: #1f1f1f;
+      color: var(--fg);
+      border: 1px solid #444;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+    }
+
+    #previewWrap {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid #333;
+      padding: 8px;
+    }
+
+    #previewCanvas {
+      display: block;
+      width: 320px;
+      height: 180px;
+      background: #060606;
+    }
+
+    #help {
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="stage">
+    <canvas id="projectorCanvas"></canvas>
+
+    <div id="hud">
+      <div><strong>Status:</strong> <span id="statusText">Connecting...</span></div>
+      <div>Camera: <span id="camInfo">-</span></div>
+      <div>Position: <span id="posInfo">-</span></div>
+      <div>Calibration: <span id="calInfo">Not set</span></div>
+      <div>Step: <span id="stepInfo">-</span></div>
+      <div id="help">Drag A/B/C, press Calibrate, then Space at each target.</div>
+    </div>
+
+    <div id="controls">
+      <button id="startBtn">Calibrate (C)</button>
+      <button id="captureBtn">Capture (Space)</button>
+      <button id="resetBtn">Reset (R)</button>
+      <label>
+        <input type="checkbox" id="useRaw" checked>
+        Use raw brightest point
+      </label>
+    </div>
+
+    <div id="markerA" class="marker" style="left: 15%; top: 15%;">A</div>
+    <div id="markerB" class="marker" style="left: 75%; top: 15%;">B</div>
+    <div id="markerC" class="marker" style="left: 15%; top: 75%;">C</div>
+
+    <div id="previewWrap">
+      <canvas id="previewCanvas" width="320" height="180"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const ws = new WebSocket('ws://localhost:8765');
+    const projectorCanvas = document.getElementById('projectorCanvas');
+    const projectorCtx = projectorCanvas.getContext('2d');
+    const previewCanvas = document.getElementById('previewCanvas');
+    const previewCtx = previewCanvas.getContext('2d');
+
+    const statusText = document.getElementById('statusText');
+    const camInfo = document.getElementById('camInfo');
+    const posInfo = document.getElementById('posInfo');
+    const calInfo = document.getElementById('calInfo');
+    const stepInfo = document.getElementById('stepInfo');
+
+    const startBtn = document.getElementById('startBtn');
+    const captureBtn = document.getElementById('captureBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const useRawToggle = document.getElementById('useRaw');
+    const markerA = document.getElementById('markerA');
+    const markerB = document.getElementById('markerB');
+    const markerC = document.getElementById('markerC');
+    const stage = document.getElementById('stage');
+
+    let lastData = null;
+    let camW = 0;
+    let camH = 0;
+
+    let calStep = 0;
+    let targetPoints = null;
+    let camSamples = null;
+    let affine = null;
+
+    function resizeCanvas() {
+      projectorCanvas.width = window.innerWidth;
+      projectorCanvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function getMarkerCenter(marker) {
+      const rect = marker.getBoundingClientRect();
+      const stageRect = stage.getBoundingClientRect();
+      return {
+        x: rect.left - stageRect.left + rect.width / 2,
+        y: rect.top - stageRect.top + rect.height / 2
+      };
+    }
+
+    function setMarkersVisible(visible) {
+      const method = visible ? 'remove' : 'add';
+      markerA.classList[method]('hidden');
+      markerB.classList[method]('hidden');
+      markerC.classList[method]('hidden');
+    }
+
+    function startCalibration() {
+      calStep = 1;
+      camSamples = { A: null, B: null, C: null };
+      setMarkersVisible(true);
+      targetPoints = {
+        A: getMarkerCenter(markerA),
+        B: getMarkerCenter(markerB),
+        C: getMarkerCenter(markerC)
+      };
+      stepInfo.textContent = 'Move light to A and press Space';
+    }
+
+    function resetCalibration() {
+      calStep = 0;
+      camSamples = null;
+      targetPoints = null;
+      affine = null;
+      setMarkersVisible(true);
+      calInfo.textContent = 'Not set';
+      stepInfo.textContent = '-';
+    }
+
+    function capturePoint() {
+      if (!lastData) return;
+      if (calStep === 0) {
+        startCalibration();
+        return;
+      }
+      const useRaw = useRawToggle.checked;
+      const x = useRaw ? lastData.raw_x : lastData.x;
+      const y = useRaw ? lastData.raw_y : lastData.y;
+
+      if (calStep === 1) {
+        camSamples.A = { x, y };
+        calStep = 2;
+        stepInfo.textContent = 'Move light to B and press Space';
+      } else if (calStep === 2) {
+        camSamples.B = { x, y };
+        calStep = 3;
+        stepInfo.textContent = 'Move light to C and press Space';
+      } else if (calStep === 3) {
+        camSamples.C = { x, y };
+        calStep = 4;
+        affine = computeAffine(camSamples, targetPoints);
+        if (affine) {
+          stepInfo.textContent = 'Calibration complete';
+          setMarkersVisible(false);
+        } else {
+          stepInfo.textContent = 'Calibration failed (collinear points)';
+        }
+      }
+    }
+
+    function updateCalInfo() {
+      if (!affine || !targetPoints) {
+        calInfo.textContent = 'Not set';
+        return;
+      }
+      calInfo.textContent = 'Affine map (A, B, C)';
+    }
+
+    function mapToProjector(pos) {
+      if (affine) {
+        const mapped = {
+          x: affine.a * pos.x + affine.b * pos.y + affine.c,
+          y: affine.d * pos.x + affine.e * pos.y + affine.f
+        };
+        mapped.x = Math.max(0, Math.min(projectorCanvas.width, mapped.x));
+        mapped.y = Math.max(0, Math.min(projectorCanvas.height, mapped.y));
+        return mapped;
+      }
+
+      const nx = pos.x / Math.max(1, camW || 1);
+      const ny = pos.y / Math.max(1, camH || 1);
+      const clampX = Math.min(1, Math.max(0, nx));
+      const clampY = Math.min(1, Math.max(0, ny));
+
+      return {
+        x: clampX * projectorCanvas.width,
+        y: clampY * projectorCanvas.height
+      };
+    }
+
+    function drawPreview(pos) {
+      previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+      previewCtx.fillStyle = '#0a0a0a';
+      previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+
+      if (!camW || !camH) return;
+
+      const scaleX = previewCanvas.width / camW;
+      const scaleY = previewCanvas.height / camH;
+
+      if (camSamples) {
+        const points = [
+          { id: 'A', color: '#2dff8b', pt: camSamples.A },
+          { id: 'B', color: '#6aa7ff', pt: camSamples.B },
+          { id: 'C', color: '#ffd36a', pt: camSamples.C }
+        ];
+        points.forEach((p) => {
+          if (!p.pt) return;
+          previewCtx.fillStyle = p.color;
+          previewCtx.beginPath();
+          previewCtx.arc(p.pt.x * scaleX, p.pt.y * scaleY, 4, 0, Math.PI * 2);
+          previewCtx.fill();
+          previewCtx.fillText(p.id, p.pt.x * scaleX + 6, p.pt.y * scaleY - 6);
+        });
+      }
+
+      previewCtx.fillStyle = '#ff7b7b';
+      previewCtx.beginPath();
+      previewCtx.arc(pos.x * scaleX, pos.y * scaleY, 4, 0, Math.PI * 2);
+      previewCtx.fill();
+    }
+
+    function drawProjector(pos, found) {
+      projectorCtx.clearRect(0, 0, projectorCanvas.width, projectorCanvas.height);
+      projectorCtx.fillStyle = '#050505';
+      projectorCtx.fillRect(0, 0, projectorCanvas.width, projectorCanvas.height);
+
+      const mapped = mapToProjector(pos);
+      projectorCtx.fillStyle = found ? '#2dff8b' : '#ff7b7b';
+      projectorCtx.beginPath();
+      projectorCtx.arc(mapped.x, mapped.y, 10, 0, Math.PI * 2);
+      projectorCtx.fill();
+    }
+
+    function updateFromData(data) {
+      lastData = data;
+      camW = data.res_w || camW;
+      camH = data.res_h || camH;
+
+      statusText.textContent = data.found ? 'LOCKED' : 'SEARCHING';
+      statusText.style.color = data.found ? '#2dff8b' : '#ff7b7b';
+      camInfo.textContent = `${camW}x${camH} @ ${data.fps.toFixed(1)} FPS`;
+
+      const useRaw = useRawToggle.checked;
+      const pos = {
+        x: useRaw ? data.raw_x : data.x,
+        y: useRaw ? data.raw_y : data.y
+      };
+      posInfo.textContent = `${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}`;
+
+      updateCalInfo();
+      drawProjector(pos, data.found);
+      drawPreview(pos);
+    }
+
+    function solve3x3(m, v) {
+      const a = m[0][0], b = m[0][1], c = m[0][2];
+      const d = m[1][0], e = m[1][1], f = m[1][2];
+      const g = m[2][0], h = m[2][1], i = m[2][2];
+      const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+      if (Math.abs(det) < 1e-6) return null;
+      const inv = [
+        [(e * i - f * h) / det, -(b * i - c * h) / det, (b * f - c * e) / det],
+        [-(d * i - f * g) / det, (a * i - c * g) / det, -(a * f - c * d) / det],
+        [(d * h - e * g) / det, -(a * h - b * g) / det, (a * e - b * d) / det]
+      ];
+      return [
+        inv[0][0] * v[0] + inv[0][1] * v[1] + inv[0][2] * v[2],
+        inv[1][0] * v[0] + inv[1][1] * v[1] + inv[1][2] * v[2],
+        inv[2][0] * v[0] + inv[2][1] * v[1] + inv[2][2] * v[2]
+      ];
+    }
+
+    function computeAffine(srcPts, dstPts) {
+      if (!srcPts || !dstPts) return null;
+      const src = [srcPts.A, srcPts.B, srcPts.C];
+      const dst = [dstPts.A, dstPts.B, dstPts.C];
+      if (src.some(p => !p) || dst.some(p => !p)) return null;
+
+      const m = [
+        [src[0].x, src[0].y, 1],
+        [src[1].x, src[1].y, 1],
+        [src[2].x, src[2].y, 1]
+      ];
+      const xVec = [dst[0].x, dst[1].x, dst[2].x];
+      const yVec = [dst[0].y, dst[1].y, dst[2].y];
+
+      const solX = solve3x3(m, xVec);
+      const solY = solve3x3(m, yVec);
+      if (!solX || !solY) return null;
+
+      return {
+        a: solX[0], b: solX[1], c: solX[2],
+        d: solY[0], e: solY[1], f: solY[2]
+      };
+    }
+
+    ws.onopen = () => {
+      statusText.textContent = 'Connected';
+      statusText.style.color = '#2dff8b';
+    };
+
+    ws.onclose = () => {
+      statusText.textContent = 'Disconnected';
+      statusText.style.color = '#ff7b7b';
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        updateFromData(JSON.parse(event.data));
+      } catch (err) {
+        console.error('WS parse error', err);
+      }
+    };
+
+    startBtn.addEventListener('click', startCalibration);
+    captureBtn.addEventListener('click', capturePoint);
+    resetBtn.addEventListener('click', resetCalibration);
+
+    function makeDraggable(marker) {
+      let offsetX = 0;
+      let offsetY = 0;
+      let dragging = false;
+
+      marker.addEventListener('pointerdown', (e) => {
+        dragging = true;
+        marker.setPointerCapture(e.pointerId);
+        const rect = marker.getBoundingClientRect();
+        offsetX = e.clientX - rect.left;
+        offsetY = e.clientY - rect.top;
+      });
+
+      marker.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const stageRect = stage.getBoundingClientRect();
+        let x = e.clientX - stageRect.left - offsetX;
+        let y = e.clientY - stageRect.top - offsetY;
+        x = Math.max(0, Math.min(stageRect.width - marker.offsetWidth, x));
+        y = Math.max(0, Math.min(stageRect.height - marker.offsetHeight, y));
+        marker.style.left = `${x}px`;
+        marker.style.top = `${y}px`;
+      });
+
+      marker.addEventListener('pointerup', () => {
+        dragging = false;
+      });
+
+      marker.addEventListener('pointercancel', () => {
+        dragging = false;
+      });
+    }
+
+    makeDraggable(markerA);
+    makeDraggable(markerB);
+    makeDraggable(markerC);
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'KeyC') startCalibration();
+      if (e.code === 'KeyR') resetCalibration();
+      if (e.code === 'Space') {
+        e.preventDefault();
+        capturePoint();
+      }
+    });
+  </script>
+</body>
+
+</html>

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IR Tracking Visualization</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #222;
+            color: #eee;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        #canvas-container {
+            border: 1px solid #555;
+            background-color: black;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+
+        canvas {
+            display: block;
+            margin-bottom: 10px;
+            color: #aaa;
+        }
+
+        #graph-container {
+            width: 640px;
+            height: 100px;
+            background: #111;
+            border: 1px solid #555;
+            margin-top: 10px;
+        }
+
+        #controls {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="status">Connecting to WebSocket...</div>
+    <div id="canvas-container">
+        <canvas id="trackerCanvas" width="640" height="360"></canvas>
+    </div>
+
+    <div id="graph-container">
+        <canvas id="graphCanvas" width="640" height="100"></canvas>
+    </div>
+
+    <div id="controls">
+        <input type="number" id="cam-index" value="0" min="0" max="10" style="width: 50px;">
+        <button onclick="switchCamera()">Switch Camera</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('trackerCanvas');
+        const ctx = canvas.getContext('2d');
+        const graphCanvas = document.getElementById('graphCanvas');
+        const graphCtx = graphCanvas.getContext('2d');
+
+        const statusEl = document.getElementById('status');
+        const camInput = document.getElementById('cam-index');
+
+        const brightnessHistory = new Array(640).fill(0);
+
+        const ws = new WebSocket('ws://localhost:8765');
+
+        let lastResW = 0;
+        let lastResH = 0;
+
+        ws.onopen = () => {
+            statusEl.innerText = 'Connected to Tracker';
+            statusEl.style.color = '#4f4';
+        };
+
+        ws.onclose = () => {
+            statusEl.innerText = 'Disconnected';
+            statusEl.style.color = '#f44';
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                render(data);
+            } catch (e) {
+                console.error("Parse error", e);
+            }
+        };
+
+        function render(data) {
+            // Update resolution if changed
+            if (data.res_w !== lastResW || data.res_h !== lastResH) {
+                canvas.width = data.res_w;
+                canvas.height = data.res_h;
+                lastResW = data.res_w;
+                lastResH = data.res_h;
+            }
+
+            // Clear
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Spot
+            // Draw Raw Input (White Dot - Small) shows instant brightest spot
+            // Draw Locked/Filtered Target (Green Dot - Large)
+            if (data.found) {
+                ctx.fillStyle = '#00ff00';
+                ctx.beginPath();
+                ctx.arc(data.x, data.y, 8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw Raw Input (Red Crosshair)
+            if (data.raw_x !== undefined) {
+                ctx.strokeStyle = '#ff0000';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                // Cross
+                ctx.moveTo(data.raw_x - 10, data.raw_y);
+                ctx.lineTo(data.raw_x + 10, data.raw_y);
+                ctx.moveTo(data.raw_x, data.raw_y - 10);
+                ctx.lineTo(data.raw_x, data.raw_y + 10);
+                ctx.stroke();
+            }
+
+            // Draw Stats
+            ctx.fillStyle = 'white';
+            ctx.font = '16px monospace';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+
+            const lines = [
+                `Res: ${data.res_w}x${data.res_h}`,
+                `FPS: ${data.fps.toFixed(1)}`,
+                `Pos: ${data.found ? data.x + ',' + data.y : 'NO SIGNAL'}`,
+                `Raw: ${data.raw_x},${data.raw_y}`,
+                `MaxVal: ${data.max_val}`,
+                `Cam Idx: ${data.camera_index}`,
+                `BEACON: ${data.locked ? 'LOCKED [10110100]' : 'SEARCHING...'}`
+            ];
+
+            let y = 10;
+            lines.forEach((line, i) => {
+                if (line.includes('LOCKED')) ctx.fillStyle = '#0f0';
+                else if (line.includes('SEARCHING')) ctx.fillStyle = '#f00';
+                else ctx.fillStyle = 'white';
+
+                ctx.fillText(line, 10, y);
+                y += 20;
+            });
+
+            drawGraph(data.max_val);
+        }
+
+        function drawGraph(val) {
+            brightnessHistory.push(val);
+            brightnessHistory.shift();
+
+            graphCtx.fillStyle = '#111';
+            graphCtx.fillRect(0, 0, graphCanvas.width, graphCanvas.height);
+
+            graphCtx.strokeStyle = '#0f0';
+            graphCtx.lineWidth = 1;
+            graphCtx.beginPath();
+
+            // Map 0-255 to height 100-0
+            for (let i = 0; i < brightnessHistory.length; i++) {
+                const h = 100 - (brightnessHistory[i] / 255 * 100);
+                if (i === 0) graphCtx.moveTo(i, h);
+                else graphCtx.lineTo(i, h);
+            }
+            graphCtx.stroke();
+
+            // Reference line at Threshold (200)
+            const threshY = 100 - (200 / 255 * 100);
+            graphCtx.strokeStyle = '#555';
+            graphCtx.beginPath();
+            graphCtx.moveTo(0, threshY);
+            graphCtx.lineTo(640, threshY);
+            graphCtx.stroke();
+        }
+
+        function switchCamera() {
+            const index = camInput.value;
+            ws.send(JSON.stringify({
+                command: "set_camera",
+                index: index
+            }));
+            statusEl.innerText = `Switching to Camera ${index}...`;
+            statusEl.style.color = '#ff0';
+        }
+    </script>
+</body>
+
+</html>
